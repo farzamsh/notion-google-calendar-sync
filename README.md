@@ -153,6 +153,7 @@ See **[TESTING.md](TESTING.md)**. Before relying on the system, test at minimum:
 
 - [SETUP.md](SETUP.md) — complete beginner setup
 - [AI_SETUP_GUIDE.md](AI_SETUP_GUIDE.md) — hand this file to an AI assistant
+- [FIND_DATA_SOURCE_ID.md](FIND_DATA_SOURCE_ID.md) — copy/paste helper for the modern Notion data source ID
 - [AI_REVIEW_COUNCIL.md](AI_REVIEW_COUNCIL.md) — adversarial review prompt for another AI/session
 - [ARCHITECTURE.md](ARCHITECTURE.md) — how synchronization and idempotency work
 - [SECURITY.md](SECURITY.md) — threat model and secret handling
