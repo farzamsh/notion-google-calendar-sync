@@ -7,15 +7,18 @@ Never commit any of these:
 ```text
 NOTION_TOKEN
 WEBHOOK_SECRET
+APPS_SCRIPT_KEY
 NOTION_VERIFICATION_TOKEN
-full /exec webhook URL containing ?key=...
+private Apps Script /exec URL if you prefer to keep it hidden
 ```
 
-Store them in:
+Store Notion/API configuration in:
 
 **Google Apps Script → Project Settings → Script Properties**
 
-The repository's source code contains no real credentials.
+Store Worker-side credentials as encrypted Cloudflare **Secrets**.
+
+The repository contains no real credentials.
 
 ## Least privilege
 
@@ -32,73 +35,106 @@ The integration does not require comment permissions or user-profile access.
 
 ## Apps Script execution identity
 
-The Web App must execute as the account that owns/edits the target Google Calendar.
+The Apps Script Web App executes as the Google account that owns/edits the target Calendar.
 
-Because Notion must call the endpoint without interactive Google sign-in, the web app must be externally reachable. Treat the URL as a sensitive endpoint.
+The Apps Script endpoint must be publicly reachable because the Cloudflare Worker calls it without interactive Google sign-in. It is protected by `WEBHOOK_SECRET`, which is known to the Worker as `APPS_SCRIPT_KEY`.
 
-## Webhook authentication limitation
+Notion does **not** receive the Apps Script key.
 
-Notion recommends validating each event's `X-Notion-Signature` using HMAC-SHA256 and the subscription verification token.
+## Why Cloudflare sits in front of Apps Script
 
-Google Apps Script's documented `doPost(e)` web-app event exposes:
+Google Apps Script `ContentService` serves responses through a redirect to `script.googleusercontent.com`. Notion's webhook contract expects a direct HTTP `200` acknowledgement.
 
-- query parameters;
-- path info;
-- POST body/content metadata;
+The Worker solves both delivery and authentication:
 
-but does not document access to arbitrary incoming HTTP headers. Therefore this Apps Script-only implementation cannot directly read `X-Notion-Signature`.
+1. receives the raw Notion webhook request;
+2. verifies `X-Notion-Signature` with HMAC-SHA256;
+3. returns HTTP `200` directly to Notion;
+4. forwards the raw payload to Apps Script using the private `APPS_SCRIPT_KEY`;
+5. follows Google's ContentService redirect internally.
 
-### Compensating control
+## Notion webhook signature validation
 
-The endpoint requires a long, random query-string secret:
-
-```text
-...?key=<WEBHOOK_SECRET>
-```
-
-Requests without the exact secret are rejected before synchronization logic runs.
-
-Generate it with:
+Notion signs live webhook events using:
 
 ```text
-createWebhookSecret()
+X-Notion-Signature: sha256=<hex digest>
 ```
 
-### Consequences
+The HMAC key is the subscription's one-time `verification_token`.
 
-This is reasonable for a personal/task automation where the webhook URL is kept private, but it is weaker than cryptographic payload authentication.
+The Worker stores that value as:
 
-For regulated, high-value, hostile, or multi-user production systems, put a small proxy in front of Apps Script (Cloudflare Worker, Cloud Run, serverless function, etc.) that can validate `X-Notion-Signature`, then forward only verified events.
+```text
+NOTION_VERIFICATION_TOKEN
+```
 
-## Never expose the secret in screenshots/issues
+and validates the signature against the **raw request body** before accepting the event.
 
-Before opening a GitHub issue, redact:
+The initial verification-token request is the only request accepted before HMAC verification is configured. It is forwarded to Apps Script so `showVerificationToken()` can display the token. Add that token to the Worker **before** clicking Verify in Notion.
+
+## Worker → Apps Script authentication
+
+Apps Script requires:
+
+```text
+WEBHOOK_SECRET
+```
+
+Cloudflare stores the same value as:
+
+```text
+APPS_SCRIPT_KEY
+```
+
+The Worker adds it to the internal Apps Script request. It is never placed in the public Notion webhook URL.
+
+## Never expose secrets in screenshots/issues/chats
+
+Before posting logs or opening a GitHub issue, redact:
 
 - Notion integration tokens;
-- Script Properties values;
-- webhook verification tokens;
-- full webhook URLs;
+- Notion verification tokens;
+- Apps Script `WEBHOOK_SECRET`;
+- Cloudflare `APPS_SCRIPT_KEY`;
+- full private URLs containing credentials;
 - private Notion page URLs if sensitive;
 - private Google Calendar IDs if sensitive.
 
 ## Token rotation
 
-If a Notion token is exposed:
+### If the Notion integration token is exposed
 
-1. revoke/rotate the connection token in Notion;
-2. update `NOTION_TOKEN` in Script Properties;
+1. rotate/revoke it in Notion;
+2. update `NOTION_TOKEN` in Apps Script Script Properties;
 3. run `validateSetup()`;
 4. inspect recent Apps Script executions.
 
-If `WEBHOOK_SECRET` is exposed:
+### If `WEBHOOK_SECRET` / `APPS_SCRIPT_KEY` is exposed
 
-1. generate a new secret;
-2. the webhook URL changes;
-3. delete/recreate the Notion webhook subscription using the new URL;
-4. verify the new subscription.
+1. run `createWebhookSecret()` again in Apps Script;
+2. copy the new `WEBHOOK_SECRET`;
+3. replace the Cloudflare Worker `APPS_SCRIPT_KEY` secret;
+4. deploy the Worker settings;
+5. the Notion webhook URL does **not** need to change.
+
+### If `NOTION_VERIFICATION_TOKEN` is exposed
+
+1. delete/recreate the Notion webhook subscription;
+2. retrieve the new verification token;
+3. update Cloudflare `NOTION_VERIFICATION_TOKEN`;
+4. verify the new Notion subscription.
+
+## Acknowledgement vs downstream processing
+
+After validating a live Notion signature, the Worker acknowledges Notion immediately and forwards to Apps Script in the background. This avoids webhook pauses caused by downstream response behavior or latency.
+
+The 15-minute Apps Script reconciliation trigger is the repair layer if a downstream forward fails after Notion has already received `200 OK`.
+
+This means reconciliation is part of the reliability model, not merely an optional convenience.
 
 ## Destructive actions
 
-The code only deletes a Calendar event when it can establish ownership through its private Notion page tag and/or agreeing stored event IDs.
+The Apps Script code only deletes a Calendar event when it can establish ownership through its private Notion page tag and/or agreeing stored event IDs.
 
-Do not weaken these ownership checks to "if an event with the same title exists, delete it." Titles are not identities.
+Do not weaken these ownership checks to "delete an event with the same title." Titles are not identities.
