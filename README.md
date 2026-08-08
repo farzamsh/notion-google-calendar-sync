@@ -1,10 +1,12 @@
 # Notion → Google Calendar Sync
 
-A free, serverless Notion → Google Calendar synchronization layer built with **Notion Webhooks + Google Apps Script**.
+A free, serverless Notion → Google Calendar synchronization layer built with **Notion Webhooks + Cloudflare Workers + Google Apps Script**.
 
 Notion is the **source of truth**. Google Calendar is a **mirror**.
 
 No Zapier, Make, paid automation plan, VPS, or always-on computer is required.
+
+> **Why the tiny Cloudflare Worker?** Google Apps Script `ContentService` serves responses through a redirect to `script.googleusercontent.com`, while Notion expects a direct HTTP `200` acknowledgement from its webhook endpoint. The Worker provides that reliable `200`, validates Notion's HMAC signature, and forwards the payload to Apps Script.
 
 ## What it does
 
@@ -21,6 +23,7 @@ No Zapier, Make, paid automation plan, VPS, or always-on computer is required.
 - Supports all-day dates, all-day date ranges, explicit start/end times, and duration-based end times.
 - Works with the default Google Calendar or a chosen calendar ID.
 - Supports custom Notion property names without editing source code.
+- Validates `X-Notion-Signature` at the Cloudflare edge using HMAC-SHA256.
 
 ## Important scope
 
@@ -43,7 +46,13 @@ Notion database/data source
         ▼
 Notion Webhook
         │
-        │ HTTPS POST + private URL secret
+        │ HTTPS POST + X-Notion-Signature
+        ▼
+Cloudflare Worker
+        │
+        ├── validate HMAC-SHA256 signature
+        ├── return HTTP 200 to Notion
+        └── forward raw body to Apps Script
         ▼
 Google Apps Script Web App
         │
@@ -91,7 +100,7 @@ Existing databases with different names are supported through Script Properties.
 
 ## Required secrets / IDs
 
-These are stored in **Apps Script → Project Settings → Script Properties**, never in this repository:
+Apps Script Script Properties:
 
 ```text
 NOTION_TOKEN
@@ -99,13 +108,23 @@ NOTION_DATA_SOURCE_ID
 WEBHOOK_SECRET
 ```
 
-Optional:
+Cloudflare Worker secrets:
+
+```text
+APPS_SCRIPT_URL
+APPS_SCRIPT_KEY
+NOTION_VERIFICATION_TOKEN
+```
+
+`APPS_SCRIPT_KEY` must equal the Apps Script `WEBHOOK_SECRET` value.
+
+Optional Apps Script property:
 
 ```text
 GOOGLE_CALENDAR_ID
 ```
 
-Never commit real tokens, webhook URLs containing your secret, or other credentials.
+Never commit real tokens, verification tokens, Apps Script keys, or private endpoint URLs.
 
 ## Duplicate prevention strategy
 
@@ -126,11 +145,13 @@ Run `installReconciliationTrigger()` once after setup. It installs a 15-minute A
 - restores Calendar title/time/description if edited manually;
 - removes mapped events when their Notion page no longer belongs to the synchronized data source.
 
+The Worker acknowledges valid Notion events immediately and forwards them to Apps Script in the background. If that downstream forward ever fails after acknowledgement, reconciliation is the repair layer.
+
 ## Security model
 
-Notion recommends validating `X-Notion-Signature` with HMAC-SHA256. Google Apps Script's documented web-app event object exposes query parameters and POST content but not arbitrary incoming request headers, so this implementation cannot directly read that signature.
+Notion signs webhook events with `X-Notion-Signature`, using the subscription verification token as the HMAC-SHA256 key. The Cloudflare Worker validates this signature before accepting live events.
 
-Instead, the webhook URL contains a long random `WEBHOOK_SECRET` query parameter and rejects requests without it. Treat the full webhook URL as a credential.
+Apps Script is not exposed directly to Notion. The Worker forwards only validated payloads and authenticates to Apps Script with `APPS_SCRIPT_KEY`, which matches the private Apps Script `WEBHOOK_SECRET`.
 
 Read **[SECURITY.md](SECURITY.md)** before using this for sensitive or high-stakes workflows.
 
@@ -160,6 +181,7 @@ See **[TESTING.md](TESTING.md)**. Before relying on the system, test at minimum:
 - [TESTING.md](TESTING.md) — end-to-end validation matrix
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — common failures and fixes
 - [docs/PERSIAN_DATABASE_EXAMPLE.md](docs/PERSIAN_DATABASE_EXAMPLE.md) — example mapping for a Persian Notion database
+- [worker/notion-webhook-proxy.js](worker/notion-webhook-proxy.js) — Cloudflare Worker source
 
 ## Official references
 
@@ -167,13 +189,16 @@ See **[TESTING.md](TESTING.md)**. Before relying on the system, test at minimum:
 - Notion webhook delivery behavior: https://developers.notion.com/reference/webhooks-events-delivery
 - Query a Notion data source: https://developers.notion.com/reference/query-a-data-source
 - Google Apps Script Web Apps: https://developers.google.com/apps-script/guides/web
+- Google Apps Script Content Service redirects: https://developers.google.com/apps-script/guides/content
 - Apps Script Calendar service: https://developers.google.com/apps-script/reference/calendar
 - Apps Script Lock service: https://developers.google.com/apps-script/reference/lock
 - Apps Script Properties service: https://developers.google.com/apps-script/guides/properties
+- Cloudflare Workers dashboard setup: https://developers.cloudflare.com/workers/get-started/dashboard/
+- Cloudflare Worker secrets: https://developers.cloudflare.com/workers/configuration/secrets/
 
 ## Cost
 
-The software itself is free and runs on Google Apps Script. Google and Notion impose platform quotas and may change their products or limits in the future, so no third-party integration can promise literal eternal availability.
+The software itself is free. It uses Google Apps Script plus the Cloudflare Workers Free plan. Cloudflare currently provides a generous daily free request allowance that is far beyond normal personal calendar usage. Google, Notion, and Cloudflare may change their products or quotas in the future, so no third-party integration can promise literal eternal availability.
 
 For normal personal task/calendar use, this avoids subscription automation services entirely.
 
